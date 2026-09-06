@@ -1,0 +1,12 @@
+{
+  "default": {
+    "internet": true,
+    "inter_device": false,
+    "mdns": false,
+    "ssdp": false,
+    "broadcast": "block"
+  },
+  "management_ip": null,
+  "management_router_ip": null,
+  "devices": {}
+}

@@ -1,0 +1,75 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=97
+STOP=10
+
+. /lib/functions.sh
+
+DEFAULT_PROJECT_DIR="/root/tfg"
+DEFAULT_PYTHON="/usr/bin/python3"
+RUNNER="/usr/libexec/tfg-service-runner"
+INTERFACE_RESOLVER="/usr/libexec/tfg-resolve-ap-interface"
+RUNTIME_DIR="/var/run/tfg"
+LOG_DIR="/var/log/tfg"
+PID_FILE="$RUNTIME_DIR/discovery.pid"
+LOG_FILE="$LOG_DIR/discovery.log"
+
+load_settings() {
+    config_load tfg
+    config_get PROJECT_DIR discovery project_dir "$DEFAULT_PROJECT_DIR"
+    config_get PYTHON discovery python "$DEFAULT_PYTHON"
+    config_get INTERFACE discovery interface "auto"
+    if [ "$INTERFACE" = "auto" ]; then
+        attempt=0
+        while ! INTERFACE="$("$INTERFACE_RESOLVER")"; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 30 ]; then
+                logger -t tfg-discovery "No se pudo resolver la interfaz del AP tras 30 segundos"
+                return 1
+            fi
+            sleep 1
+        done
+    fi
+    config_get RELOAD_INTERVAL discovery reload_interval "2"
+    config_get RATE_LIMIT discovery rate_limit "20"
+}
+
+boot() {
+    config_load tfg
+    config_get SETUP_COMPLETE main setup_complete "0"
+    if [ "$SETUP_COMPLETE" != "1" ]; then
+        logger -t tfg-discovery "SETUP pendiente; se omite el arranque automático"
+        return 0
+    fi
+    start
+}
+
+start_service() {
+    load_settings || return 1
+    if [ ! -x "$RUNNER" ] || [ ! -f "$PROJECT_DIR/discovery_relay.py" ]; then
+        logger -t tfg-discovery "No se encuentra el relay o $RUNNER"
+        return 1
+    fi
+    mkdir -p "$RUNTIME_DIR" "$LOG_DIR" || return 1
+    procd_open_instance
+    procd_set_param command "$RUNNER" "$PID_FILE" "$LOG_FILE" \
+        "$PYTHON" -u "$PROJECT_DIR/discovery_relay.py" \
+        --interface "$INTERFACE" \
+        --policies "$PROJECT_DIR/policies.json" \
+        --database "$PROJECT_DIR/database.json" \
+        --reload-interval "$RELOAD_INTERVAL" \
+        --rate-limit "$RATE_LIMIT"
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    rm -f "$PID_FILE"
+}
+
+service_triggers() {
+    procd_add_reload_trigger "tfg"
+}

@@ -1,0 +1,71 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=98
+STOP=10
+
+. /lib/functions.sh
+
+DEFAULT_ZEEK_BINARY="/opt/zeek/bin/zeek"
+DEFAULT_LOG_DIR="/var/log/tfg/zeek"
+RUNNER="/usr/libexec/tfg-service-runner"
+INTERFACE_RESOLVER="/usr/libexec/tfg-resolve-ap-interface"
+RUNTIME_DIR="/var/run/tfg"
+PID_FILE="$RUNTIME_DIR/zeek.pid"
+
+load_settings() {
+    config_load tfg
+    config_get INTERFACE zeek interface "auto"
+    if [ "$INTERFACE" = "auto" ]; then
+        attempt=0
+        while ! INTERFACE="$("$INTERFACE_RESOLVER")"; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 30 ]; then
+                logger -t tfg-zeek "No se pudo resolver la interfaz del AP tras 30 segundos"
+                return 1
+            fi
+            sleep 1
+        done
+    fi
+    config_get ZEEK_BINARY zeek binary "$DEFAULT_ZEEK_BINARY"
+    config_get LOG_DIR zeek log_dir "$DEFAULT_LOG_DIR"
+    CONSOLE_LOG="$LOG_DIR/zeek.log"
+}
+
+boot() {
+    config_load tfg
+    config_get SETUP_COMPLETE main setup_complete "0"
+    if [ "$SETUP_COMPLETE" != "1" ]; then
+        logger -t tfg-zeek "SETUP pendiente; se omite el arranque automático"
+        return 0
+    fi
+    start
+}
+
+start_service() {
+    load_settings || return 1
+    if [ ! -x "$ZEEK_BINARY" ]; then
+        logger -t tfg-zeek "Zeek no está instalado o no es ejecutable: $ZEEK_BINARY"
+        return 1
+    fi
+    if [ ! -x "$RUNNER" ]; then
+        logger -t tfg-zeek "No se encuentra $RUNNER"
+        return 1
+    fi
+    mkdir -p "$RUNTIME_DIR" "$LOG_DIR" || return 1
+    procd_open_instance
+    procd_set_param command "$RUNNER" "$PID_FILE" "$CONSOLE_LOG" \
+        "$ZEEK_BINARY" -i "$INTERFACE" "Log::default_logdir=$LOG_DIR"
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    rm -f "$PID_FILE"
+}
+
+service_triggers() {
+    procd_add_reload_trigger "tfg"
+}

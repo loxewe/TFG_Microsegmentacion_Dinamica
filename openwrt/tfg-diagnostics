@@ -1,0 +1,199 @@
+#!/bin/sh
+
+# Diagnóstico de solo lectura para una instalación OpenWrt del TFG.
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+MAX_WAIT_ATTEMPTS=10
+
+pass() {
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[OK] %s\n' "$1"
+}
+
+warn() {
+    WARN_COUNT=$((WARN_COUNT + 1))
+    printf '[AVISO] %s\n' "$1"
+}
+
+fail() {
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FALLO] %s\n' "$1"
+}
+
+service_is_running() {
+    [ -x "/etc/init.d/$1" ] && "/etc/init.d/$1" status >/dev/null 2>&1
+}
+
+check_running_service() {
+    if service_is_running "$1"; then
+        pass "Servicio $1 activo"
+    else
+        fail "Servicio $1 inactivo"
+    fi
+}
+
+check_stopped_service() {
+    if service_is_running "$1"; then
+        fail "Servicio $1 no debería estar activo durante SETUP"
+    else
+        pass "Servicio $1 detenido durante SETUP"
+    fi
+}
+
+check_listener() {
+    port="$1"
+    attempt=0
+    while [ "$attempt" -lt "$MAX_WAIT_ATTEMPTS" ]; do
+        if netstat -lnt 2>/dev/null | grep -Eq ":$port[[:space:]]"; then
+            pass "Puerto TCP $port en escucha"
+            return
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$MAX_WAIT_ATTEMPTS" ] && sleep 1
+    done
+    fail "Puerto TCP $port sin listener"
+}
+
+check_http() {
+    url="$1"
+    expected="$2"
+    success_message="$3"
+    failure_message="$4"
+    attempt=0
+    while [ "$attempt" -lt "$MAX_WAIT_ATTEMPTS" ]; do
+        response="$(wget -qO- "$url" 2>/dev/null)"
+        if printf '%s' "$response" | grep -q "$expected"; then
+            pass "$success_message"
+            return
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$MAX_WAIT_ATTEMPTS" ] && sleep 1
+    done
+    fail "$failure_message"
+}
+
+check_readable_log() {
+    if [ -r "$1" ]; then
+        pass "Log legible: $1"
+    else
+        warn "Log todavía ausente o no legible: $1"
+    fi
+}
+
+SETUP_COMPLETE="$(uci -q get tfg.main.setup_complete 2>/dev/null)"
+PROJECT_DIR="$(uci -q get tfg.web.project_dir 2>/dev/null)"
+ZEEK_LOG_DIR="$(uci -q get tfg.zeek.log_dir 2>/dev/null)"
+WIFI_RADIO="$(uci -q get tfg.main.wifi_radio 2>/dev/null)"
+WIFI_SECTION="$(uci -q get tfg.main.wifi_section 2>/dev/null)"
+[ -n "$PROJECT_DIR" ] || PROJECT_DIR="/root/tfg"
+[ -n "$ZEEK_LOG_DIR" ] || ZEEK_LOG_DIR="/var/log/tfg/zeek"
+[ -n "$WIFI_RADIO" ] || WIFI_RADIO="radio0"
+[ -n "$WIFI_SECTION" ] || WIFI_SECTION="wifinet1"
+
+printf '%s\n' 'Diagnóstico TFG (solo lectura)'
+printf 'Modo UCI: setup_complete=%s\n\n' "${SETUP_COMPLETE:-no definido}"
+
+if [ -f "$PROJECT_DIR/setup_portal.py" ]; then
+    pass "Proyecto encontrado en $PROJECT_DIR"
+else
+    fail "No se encuentra $PROJECT_DIR/setup_portal.py"
+fi
+
+check_running_service "tfg-web"
+check_listener "80"
+
+if [ "$SETUP_COMPLETE" = "1" ]; then
+    check_running_service "tfg-dhcp"
+    check_running_service "tfg-discovery"
+    check_running_service "tfg-zeek"
+
+    AP_INTERFACE="$(/usr/libexec/tfg-resolve-ap-interface 2>/dev/null)"
+    if [ -n "$AP_INTERFACE" ]; then
+        pass "Interfaz del AP resuelta: $AP_INTERFACE ($WIFI_RADIO)"
+    else
+        fail "No se pudo resolver la interfaz del AP $WIFI_RADIO"
+    fi
+
+    WIFI_ISOLATE="$(uci -q get wireless."$WIFI_SECTION".isolate 2>/dev/null)"
+    BRIDGE_ISOLATE="$(uci -q get wireless."$WIFI_SECTION".bridge_isolate 2>/dev/null)"
+    if [ "$WIFI_ISOLATE" = "1" ] && [ "$BRIDGE_ISOLATE" = "1" ]; then
+        pass "Aislamiento configurado en wireless.$WIFI_SECTION"
+    else
+        fail "El AP no confirma isolate=1 y bridge_isolate=1"
+    fi
+
+    AP_DRIVER="$(
+        readlink -f "/sys/class/net/$AP_INTERFACE/device/driver" 2>/dev/null
+    )"
+    case "$AP_DRIVER" in
+        */brcmfmac)
+            fail "brcmfmac no garantiza el aislamiento entre estaciones"
+            ;;
+        "")
+            warn "No se pudo identificar el driver del AP"
+            ;;
+        *)
+            pass "Driver del AP: $(basename "$AP_DRIVER")"
+            ;;
+    esac
+
+    if nft list table netdev tfg_l2 >/dev/null 2>&1; then
+        pass "Tabla nftables netdev tfg_l2 disponible"
+    else
+        fail "Tabla nftables netdev tfg_l2 no disponible"
+    fi
+    if [ -n "$AP_INTERFACE" ] &&
+       nft list chain netdev tfg_l2 ingress 2>/dev/null |
+           grep -Fq "device \"$AP_INTERFACE\""; then
+        pass "Filtro L2 enlazado a $AP_INTERFACE"
+    else
+        fail "El filtro L2 no está enlazado a la interfaz actual del AP"
+    fi
+    if nft list set netdev tfg_l2 mdns_allowed_macs >/dev/null 2>&1 && \
+       nft list set netdev tfg_l2 ssdp_allowed_macs >/dev/null 2>&1 && \
+       nft list set netdev tfg_l2 broadcast_allowed_macs >/dev/null 2>&1 && \
+       nft list set netdev tfg_l2 broadcast_logged_macs >/dev/null 2>&1; then
+        pass "Conjuntos nftables de descubrimiento disponibles"
+    else
+        fail "Faltan conjuntos nftables de descubrimiento"
+    fi
+    if nft list table inet tfg_l3 >/dev/null 2>&1; then
+        pass "Tabla nftables inet tfg_l3 disponible"
+    else
+        fail "Tabla nftables inet tfg_l3 no disponible"
+    fi
+
+    check_readable_log "$ZEEK_LOG_DIR/conn.log"
+    check_readable_log "$ZEEK_LOG_DIR/dns.log"
+    check_readable_log "/var/log/tfg/discovery.log"
+
+    check_http \
+        "http://127.0.0.1/api/status" '"mode":"NORMAL"' \
+        "API web responde en modo NORMAL" \
+        "La API web no confirma el modo NORMAL"
+elif [ "$SETUP_COMPLETE" = "0" ]; then
+    check_running_service "dnsmasq"
+    check_stopped_service "tfg-dhcp"
+    check_stopped_service "tfg-discovery"
+    check_stopped_service "tfg-zeek"
+
+    check_http \
+        "http://127.0.0.1/setup/status" '"setup_complete":false' \
+        "Portal web responde en modo SETUP" \
+        "El portal web no confirma el modo SETUP"
+else
+    fail "tfg.main.setup_complete debe valer 0 o 1"
+fi
+
+if netstat -lnt 2>/dev/null | grep -Eq ':8081[[:space:]]'; then
+    pass "Administración HTTP de LuCI disponible en 8081"
+else
+    warn "No se detecta un listener HTTP de LuCI en 8081"
+fi
+
+printf '\nResultado: %s correctas, %s avisos, %s fallos.\n' \
+    "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+
+[ "$FAIL_COUNT" -eq 0 ]

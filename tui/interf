@@ -1,0 +1,138 @@
+import threading
+import time
+from datetime import datetime
+from collections import Counter
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.console import Console
+from rich.text import Text
+
+# --- ESTRUCTURA DE DATOS COMPARTIDA (Protegida con Lock) ---
+stats_lock = threading.Lock()
+network_stats = {
+    "devices": {
+        "00:1A:2B:3C:4D:5E": {"ip": "192.168.10.10", "iface": "macvlan_iot", "status": "AISLADO", "bytes": 1250000, "pkts": 1420},
+        "AA:BB:CC:DD:EE:FF": {"ip": "192.168.20.50", "iface": "macvlan_pc",  "status": "PERMITIDO", "bytes": 45000000, "pkts": 8900},
+        "11:22:33:44:55:66": {"ip": "192.168.30.15", "iface": "macvlan_guest","status": "BLOQUEADO", "bytes": 0, "pkts": 12},
+    },
+    "protocols": Counter({"HTTPS": 3420, "DNS": 145, "DHCP": 8, "ICMP": 23}),
+    "logs": [
+        "[12:00:01] SDN Controller iniciado en interfaz puente.",
+        "[12:01:05] DHCP: Asignada IP 192.168.10.10 -> macvlan_iot",
+        "[12:03:22] ALERTA: Intento de escaneo ARP bloqueado en macvlan_guest",
+        "[12:05:10] Política de microsegmentación actualizada para AA:BB:CC:DD:EE:FF"
+    ],
+    "total_packets": 10355
+}
+
+# --- HILO 1: SIMULADOR DE CAPTURA SCAPY ---
+def background_sniffer():
+    while True:
+        time.sleep(0.5)
+        with stats_lock:
+            network_stats["total_packets"] += 25
+            network_stats["protocols"]["HTTPS"] += 18
+            network_stats["protocols"]["DNS"] += 4
+            network_stats["devices"]["00:1A:2B:3C:4D:5E"]["bytes"] += 4096
+            network_stats["devices"]["00:1A:2B:3C:4D:5E"]["pkts"] += 5
+
+            # Simulación de un evento en el log
+            if network_stats["total_packets"] % 250 == 0:
+                t_now = datetime.now().strftime("%H:%M:%S")
+                network_stats["logs"].append(f"[{t_now}] Inspección DPI: Flujo TLS validado en macvlan_pc")
+
+# --- CONSTRUCCIÓN DE COMPONENTES VISUALES ---
+def generar_tabla_dispositivos():
+    table = Table(expand=True, border_style="cyan")
+    table.add_column("MAC", style="bold white", width=18)
+    table.add_column("IP", style="green", width=15)
+    table.add_column("Interfaz Virtual", style="blue", width=16)
+    table.add_column("Estado SDN", justify="center", width=14)
+    table.add_column("Tráfico (MB)", justify="right", style="magenta", width=12)
+    table.add_column("Paquetes", justify="right", style="yellow", width=10)
+
+    for mac, data in network_stats["devices"].items():
+        # Formateo visual del estado con colores
+        status = data["status"]
+        if status == "PERMITIDO":
+            status_txt = Text("● PERMITIDO", style="bold green")
+        elif status == "AISLADO":
+            status_txt = Text("● AISLADO", style="bold yellow")
+        else:
+            status_txt = Text("▲ BLOQUEADO", style="bold red")
+
+        mb = f"{data['bytes'] / (1024*1024):.2f} MB"
+        table.add_row(mac, data["ip"], data["iface"], status_txt, mb, str(data["pkts"]))
+
+    return Panel(table, title="[bold white]Microsegmentación y Aislamiento por Dispositivo[/bold white]", border_style="cyan")
+
+def generar_panel_protocolos():
+    table = Table(expand=True, show_header=False, box=None)
+    table.add_column("Proto", style="bold cyan")
+    table.add_column("Count", style="white", justify="right")
+
+    for proto, count in network_stats["protocols"].most_common(5):
+        table.add_row(f"▪ {proto}", f"{count:,}")
+
+    return Panel(table, title="[bold white]Protocolos[/bold white]", border_style="blue")
+
+def generar_panel_logs():
+    log_text = Text()
+    # Mostrar solo los últimos 6 mensajes del registro
+    for log_msg in network_stats["logs"][-6:]:
+        if "ALERTA" in log_msg or "BLOQUEADO" in log_msg:
+            log_text.append(log_msg + "\n", style="bold red")
+        elif "DHCP" in log_msg or "SDN" in log_msg:
+            log_text.append(log_msg + "\n", style="cyan")
+        else:
+            log_text.append(log_msg + "\n", style="dim white")
+
+    return Panel(log_text, title="[bold white]Eventos del Plano de Control y Seguridad[/bold white]", border_style="green")
+
+def construir_layout_principal():
+    layout = Layout()
+
+    # Dividir la pantalla en 3 franjas horizontales: Cabecera, Cuerpo y Pie (Logs)
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="body", ratio=1),
+        Layout(name="footer", size=8)
+    )
+
+    # Dividir el cuerpo horizontalmente en Tabla Principal y Panel de Protocolos
+    layout["body"].split_row(
+        Layout(name="main_table", ratio=3),
+        Layout(name="side_stats", ratio=1)
+    )
+
+    with stats_lock:
+        # Asignar los widgets a cada sección
+        title_text = f" [bold cyan]RASPBERRY PI SDN CONTROLLER[/bold cyan] | [white]Paquetes Totales Capturados: [bold yellow]{network_stats['total_packets']:,}[/bold yellow][/white] "
+        layout["header"].update(Panel(title_text, style="bold white", border_style="blue"))
+        layout["main_table"].update(generar_tabla_dispositivos())
+        layout["side_stats"].update(generar_panel_protocolos())
+        layout["footer"].update(generar_panel_logs())
+
+    return layout
+
+# --- EJECUCIÓN PRINCIPAL ---
+if __name__ == "__main__":
+    console = Console()
+
+    # Iniciar el sniffer en segundo plano
+    t = threading.Thread(target=background_sniffer, daemon=True)
+    t.start()
+
+    console.clear()
+    console.print("[yellow]Iniciando monitorización SDN... Pulsa Ctrl+C para salir.[/yellow]")
+    time.sleep(1)
+
+    try:
+        # Live refresca automáticamente la terminal 4 veces por segundo (refresh_per_second=4)
+        with Live(construir_layout_principal(), refresh_per_second=4, screen=True):
+            while True:
+                time.sleep(0.25)
+    except KeyboardInterrupt:
+        console.print("\n[bold green]✔ Monitorización detenida correctamente.[/bold green]")

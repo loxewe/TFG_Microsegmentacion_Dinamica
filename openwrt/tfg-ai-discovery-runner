@@ -1,0 +1,135 @@
+#!/bin/sh
+
+# Ejecuta un descubrimiento Codex con DNS público solo para el host OpenWrt.
+# Los clientes SETUP siguen consultando dnsmasq y conservan el portal cautivo.
+
+HOST_RESOLV="/tmp/resolv.conf"
+UPSTREAM_RESOLV="/tmp/resolv.conf.d/resolv.conf.auto"
+RUNTIME_DIR="/tmp/tfg-ai-resolver"
+LOCK_DIR="/tmp/tfg-ai-resolver.lock"
+BACKUP_FILE="$RUNTIME_DIR/resolv.conf.backup"
+DISCOVERY_RESOLV="$RUNTIME_DIR/resolv.conf.discovery"
+PID_FILE="$RUNTIME_DIR/runner.pid"
+CHILD_PID=""
+CREDENTIALS_DIR=""
+JOB_ID=""
+OWNS_RESOLVER=0
+
+restore_resolver() {
+    if [ -f "$BACKUP_FILE" ]; then
+        cp "$BACKUP_FILE" "$HOST_RESOLV" || return 1
+    fi
+    rm -rf "$RUNTIME_DIR" "$LOCK_DIR"
+}
+
+restore_stale_resolver() {
+    if [ ! -d "$LOCK_DIR" ]; then
+        return 0
+    fi
+    if [ -f "$PID_FILE" ]; then
+        runner_pid="$(cat "$PID_FILE" 2>/dev/null)"
+        if [ -n "$runner_pid" ] && kill -0 "$runner_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    restore_resolver
+}
+
+cleanup() {
+    trap - EXIT INT TERM
+    if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
+        kill "$CHILD_PID" 2>/dev/null
+        wait "$CHILD_PID" 2>/dev/null
+    fi
+    if [ -n "$CREDENTIALS_DIR" ] && [ -n "$JOB_ID" ]; then
+        rm -f "$CREDENTIALS_DIR/$JOB_ID.json"
+    fi
+    if [ "$OWNS_RESOLVER" = "1" ]; then
+        restore_resolver
+    fi
+}
+
+if [ "$1" = "--restore-only" ]; then
+    restore_stale_resolver
+    exit $?
+fi
+
+if [ "$#" -lt 10 ]; then
+    echo "Uso: tfg-ai-discovery-runner PYTHON SCRIPT STATE_DIR JOB_ID PROJECT_DIR CODEX_BINARY LOG_FILE CREDENTIALS_DIR DNS_SERVERS INTEGRATIONS_DIR" >&2
+    exit 64
+fi
+
+PYTHON="$1"
+SCRIPT="$2"
+STATE_DIR="$3"
+JOB_ID="$4"
+PROJECT_DIR="$5"
+CODEX_BINARY="$6"
+LOG_FILE="$7"
+CREDENTIALS_DIR="$8"
+DNS_SERVERS="$9"
+INTEGRATIONS_DIR="${10}"
+
+umask 077
+trap cleanup EXIT INT TERM
+restore_stale_resolver || exit 1
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Ya existe otro descubrimiento con DNS local habilitado" >&2
+    exit 1
+fi
+OWNS_RESOLVER=1
+mkdir -p "$RUNTIME_DIR" "$(dirname "$LOG_FILE")" || {
+    rm -rf "$LOCK_DIR"
+    exit 1
+}
+printf '%s\n' "$$" > "$PID_FILE" || {
+    rm -rf "$RUNTIME_DIR" "$LOCK_DIR"
+    exit 1
+}
+
+if [ ! -s "$HOST_RESOLV" ] || [ ! -s "$UPSTREAM_RESOLV" ]; then
+    echo "No están disponibles los resolvedores local y upstream" >&2
+    rm -rf "$RUNTIME_DIR" "$LOCK_DIR"
+    exit 1
+fi
+if ! grep -q '^[[:space:]]*nameserver[[:space:]]' "$UPSTREAM_RESOLV"; then
+    echo "El resolvedor upstream no contiene servidores DNS" >&2
+    rm -rf "$RUNTIME_DIR" "$LOCK_DIR"
+    exit 1
+fi
+
+cp "$HOST_RESOLV" "$BACKUP_FILE" || {
+    rm -rf "$RUNTIME_DIR" "$LOCK_DIR"
+    exit 1
+}
+
+# Los routers domésticos pueden anunciar DNS inaccesibles o cautivos. Codex
+# usa primero los servidores configurados y conserva los de WAN como respaldo.
+: > "$DISCOVERY_RESOLV" || exit 1
+for dns_server in $DNS_SERVERS; do
+    case "$dns_server" in
+        *[!0-9A-Fa-f:.]*)
+            echo "Servidor DNS ignorado por formato no válido: $dns_server" >> "$LOG_FILE"
+            continue
+            ;;
+    esac
+    printf 'nameserver %s\n' "$dns_server" >> "$DISCOVERY_RESOLV"
+done
+cat "$UPSTREAM_RESOLV" >> "$DISCOVERY_RESOLV" || exit 1
+if ! grep -q '^[[:space:]]*nameserver[[:space:]]' "$DISCOVERY_RESOLV"; then
+    echo "No hay servidores DNS válidos para el descubrimiento" >&2
+    exit 1
+fi
+cp "$DISCOVERY_RESOLV" "$HOST_RESOLV" || exit 1
+
+echo "DNS de descubrimiento habilitado temporalmente solo para la Raspberry" >> "$LOG_FILE"
+"$PYTHON" -u "$SCRIPT" --state-dir "$STATE_DIR" \
+    --integrations-dir "$INTEGRATIONS_DIR" run "$JOB_ID" \
+    --project-dir "$PROJECT_DIR" --codex-binary "$CODEX_BINARY" \
+    --credentials-dir "$CREDENTIALS_DIR" \
+    >> "$LOG_FILE" 2>&1 &
+CHILD_PID="$!"
+wait "$CHILD_PID"
+RESULT="$?"
+CHILD_PID=""
+exit "$RESULT"

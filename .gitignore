@@ -1,0 +1,18 @@
+# Estado local y credenciales
+database.json
+policies.json
+*.pcap
+*.log
+.env
+
+# Python y pruebas
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.pytest-tmp/
+
+# Archivos temporales del sistema
+tmp/
+.setup_complete
+.setup_complete.tmp

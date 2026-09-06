@@ -1,0 +1,43 @@
+#!/bin/sh
+
+. /lib/functions.sh
+
+config_load tfg
+config_get WIFI_RADIO main wifi_radio "radio0"
+config_get WIFI_SECTION main wifi_section "wifinet1"
+
+case "$WIFI_RADIO:$WIFI_SECTION" in
+    :*|*:|*[!a-zA-Z0-9_:]*)
+        exit 1
+        ;;
+esac
+
+STATUS="$(ubus call network.wireless status 2>/dev/null)" || exit 1
+RADIO_UP="$(
+    printf '%s\n' "$STATUS" |
+        jsonfilter -e "@.${WIFI_RADIO}.up" 2>/dev/null
+)"
+[ "$RADIO_UP" = "true" ] || exit 1
+
+INTERFACES="$(
+    printf '%s\n' "$STATUS" |
+        jsonfilter -l 2 \
+            -e "@.${WIFI_RADIO}.interfaces[@.section='${WIFI_SECTION}'].ifname" \
+            2>/dev/null
+)"
+
+# Los nombres de interfaz no contienen espacios. Deshabilitar globbing permite
+# contar de forma segura cero, una o varias coincidencias de jsonfilter.
+set -f
+set -- $INTERFACES
+[ "$#" -eq 1 ] || exit 1
+INTERFACE="$1"
+
+case "$INTERFACE" in
+    ""|*[!a-zA-Z0-9_.-]*)
+        exit 1
+        ;;
+esac
+
+[ -d "/sys/class/net/$INTERFACE" ] || exit 1
+printf '%s\n' "$INTERFACE"

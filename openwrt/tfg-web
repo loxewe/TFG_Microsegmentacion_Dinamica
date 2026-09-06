@@ -1,0 +1,97 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=95
+STOP=10
+
+. /lib/functions.sh
+
+DEFAULT_PROJECT_DIR="/root/tfg"
+DEFAULT_PYTHON="/usr/bin/python3"
+DEFAULT_ZEEK_LOG_DIR="/var/log/tfg/zeek"
+RUNNER="/usr/libexec/tfg-service-runner"
+INTERFACE_RESOLVER="/usr/libexec/tfg-resolve-ap-interface"
+AI_DNS_RUNNER="/usr/libexec/tfg-ai-discovery-runner"
+AI_INTEGRATIONS_DIR="/etc/tfg-ai/integrations"
+LEGACY_AI_INTEGRATIONS_DIR="/var/lib/tfg-ai/integrations"
+BUNDLED_AI_INTEGRATIONS_RELATIVE_DIR="docs/experiments/generated_integrations"
+AI_APPROVED_DIR="/etc/tfg-ai/approved"
+LEGACY_AI_APPROVED_DIR="/var/lib/tfg-ai/approved"
+RUNTIME_DIR="/var/run/tfg"
+LOG_DIR="/var/log/tfg"
+PID_FILE="$RUNTIME_DIR/web.pid"
+LOG_FILE="$LOG_DIR/web.log"
+
+load_settings() {
+    config_load tfg
+    config_get PROJECT_DIR web project_dir "$DEFAULT_PROJECT_DIR"
+    config_get PYTHON web python "$DEFAULT_PYTHON"
+    config_get LISTEN web listen "0.0.0.0"
+    config_get PORT web port "80"
+    config_get ZEEK_LOG_DIR zeek log_dir "$DEFAULT_ZEEK_LOG_DIR"
+    INTERFACE="$("$INTERFACE_RESOLVER" 2>/dev/null)"
+    [ -n "$INTERFACE" ] || INTERFACE="phy0-ap0"
+}
+
+migrate_registry_dir() {
+    source_dir="$1"
+    persistent_dir="$2"
+    [ -f "$source_dir/manifest.json" ] || return 0
+    [ ! -f "$persistent_dir/manifest.json" ] || return 0
+
+    mkdir -p "$persistent_dir" || return 1
+    for source in "$source_dir"/*.py; do
+        [ -f "$source" ] || continue
+        cp "$source" "$persistent_dir/" || return 1
+    done
+    cp "$source_dir/manifest.json" "$persistent_dir/manifest.json" || return 1
+    chmod 700 /etc/tfg-ai "$persistent_dir" || return 1
+    chmod 600 "$persistent_dir"/* || return 1
+}
+
+initialize_persistent_registries() {
+    migrate_registry_dir \
+        "$LEGACY_AI_INTEGRATIONS_DIR" "$AI_INTEGRATIONS_DIR" || return 1
+    migrate_registry_dir \
+        "$PROJECT_DIR/$BUNDLED_AI_INTEGRATIONS_RELATIVE_DIR" \
+        "$AI_INTEGRATIONS_DIR" || return 1
+    migrate_registry_dir \
+        "$LEGACY_AI_APPROVED_DIR" "$AI_APPROVED_DIR" || return 1
+}
+
+
+start_service() {
+    load_settings
+    if [ ! -x "$RUNNER" ] || [ ! -f "$PROJECT_DIR/setup_portal.py" ]; then
+        logger -t tfg-web "No se encuentra el portal o $RUNNER"
+        return 1
+    fi
+    if [ -x "$AI_DNS_RUNNER" ]; then
+        "$AI_DNS_RUNNER" --restore-only || \
+            logger -t tfg-web "No se pudo recuperar el resolvedor local"
+    fi
+    if ! initialize_persistent_registries; then
+        logger -t tfg-web "No se pudieron inicializar los registros verificados"
+        return 1
+    fi
+    mkdir -p "$RUNTIME_DIR" "$LOG_DIR" || return 1
+    procd_open_instance
+    procd_set_param command "$RUNNER" "$PID_FILE" "$LOG_FILE" \
+        "$PYTHON" -u "$PROJECT_DIR/setup_portal.py" \
+        --listen "$LISTEN" --port "$PORT"
+    procd_set_param env \
+        TFG_ZEEK_LOG_DIR="$ZEEK_LOG_DIR" \
+        TFG_INTERFACE="$INTERFACE"
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    rm -f "$PID_FILE"
+}
+
+service_triggers() {
+    procd_add_reload_trigger "tfg"
+}
