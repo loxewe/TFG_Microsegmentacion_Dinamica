@@ -1,6 +1,6 @@
-# Ingeniería Inversa del Router ZTE (Versión Firmware Legacy/Digi)
+# Ingeniería Inversa del Router ZTE ZXHN H298A V1.0
 
-Este documento expone el análisis del protocolo de un modelo ZTE con un firmware anterior o de distinta operadora (comúnmente asociado a configuraciones como las de Digi en la IP 192.168.1.1). A diferencia del modelo avanzado H298A, este router presenta una arquitectura de seguridad web más tradicional, aunque incluye rudimentos tempranos de los sistemas Anti-Bot que posteriormente evolucionarían en los modelos más nuevos.
+Este documento expone el análisis del protocolo del ZTE ZXHN H298A V1.0 (hardware V1.0.25, software V1.0.25_DIGI.1T20), accesible en la IP 192.168.1.1. A diferencia del ZTE F6705, más reciente, este router presenta una arquitectura de seguridad web más tradicional, aunque incluye rudimentos de los sistemas Anti-Bot que el F6705 lleva más lejos.
 
 ---
 
@@ -21,7 +21,7 @@ Este enfoque protege la contraseña real (no viaja en texto plano), pero es vuln
 
 Al igual que en los modelos modernos de ZTE, este router protege sus endpoints lógicos (`.lua`) contra automatizaciones y ataques de Falsificación de Petición en Sitios Cruzados (CSRF).
 
-Para apagar o encender el Wi-Fi, la lógica de automatización (`conmutar_zte.py`) debe seguir un procedimiento estricto de **Server-Side Rendering (SSR) Tacking**:
+Para apagar o encender el Wi-Fi, la lógica de automatización (`conmutar_zte_legacy.py`) debe seguir un procedimiento estricto de **Server-Side Rendering (SSR) Tacking**:
 
 ### 2.1. Navegación Ficticia (Page Context)
 El servidor no permite enviar un POST directo para aplicar cambios en el Wi-Fi. Primero, exige que el usuario cargue visualmente la plantilla HTML del menú inalámbrico.
@@ -41,7 +41,7 @@ El script de automatización debe _parsear_ el HTML, limpiar la ofuscación unic
 
 Con el token efímero extraído, el script finalmente está autorizado a interactuar con el motor LUA de configuración.
 
-A diferencia del router ZTE avanzado que requiere cifrar toda la petición en Base64/RSA, este firmware acepta las peticiones en formato estándar `application/x-www-form-urlencoded`.
+A diferencia del ZTE F6705, que requiere cifrar toda la petición en Base64/RSA, este firmware acepta las peticiones en formato estándar `application/x-www-form-urlencoded`.
 
 El script ensambla un POST dirigido a `common_page/Localnet_WlanBasicAd_OnOff_lua.lua` con las variables físicas de las radios de 2.4GHz y 5GHz:
 * `IF_ACTION=Apply`
@@ -55,9 +55,9 @@ El servidor procesa el formulario estándar y responde con una validación XML s
 
 ## Conclusión
 
-La arquitectura de este ZTE "Legacy" demuestra la evolución de los firewalls internos en los routers de operadora. Mientras que este modelo dependía de:
+La arquitectura de este ZXHN H298A demuestra la evolución de los firewalls internos en los routers de operadora. Mientras que este modelo dependía de:
 * Hashing estático (SHA-256).
 * Tokens dinámicos ofuscados inyectados directamente en el código fuente HTML.
 * Payload en texto plano.
 
-El modelo posterior (H298A) evolucionaría estos mismos conceptos hacia un estándar mucho más restrictivo (Cifrado RSA del Payload, Headers específicos, y separación estricta entre plantillas visuales `menuView` y endpoints de datos). La comparación entre ambos evidencia una clara tendencia de los fabricantes hacia la fortificación agresiva del frontend web contra la automatización.
+El F6705, más reciente, lleva estos mismos conceptos hacia un estándar mucho más restrictivo (Cifrado RSA del Payload, Headers específicos, y separación estricta entre plantillas visuales `menuView` y endpoints de datos). La comparación entre ambos evidencia una clara tendencia de los fabricantes hacia la fortificación agresiva del frontend web contra la automatización.

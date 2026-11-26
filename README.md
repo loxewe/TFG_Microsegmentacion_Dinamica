@@ -66,8 +66,6 @@ que el plano de políticas no controle.
 | `openwrt/` | Servicios procd, configuración UCI y diagnóstico. |
 | `tui/` | Monitorización de tráfico en terminal. |
 | `tests/` | Pruebas automatizadas sin necesidad de router o Raspberry Pi. |
-| `docs/experiments/` | Metodología y evidencias técnicas de validación. |
-| `Memoria tfg/latex/` | Fuentes LaTeX y PDF de la memoria. |
 
 ## Requisitos
 
@@ -100,7 +98,7 @@ python -m compileall controlador_aut.py interfaces_creator.py setup_portal.py ro
 python -m pytest tests
 ```
 
-La última validación local del repositorio completó 231 pruebas correctamente.
+La última validación local del repositorio completó 246 pruebas correctamente.
 
 ## Despliegue en OpenWrt
 
@@ -155,9 +153,3 @@ pasarse por argumentos de línea de comandos ni guardarse en el repositorio.
 - La compatibilidad con routers depende de su firmware e interfaz de gestión.
 - Los permisos de descubrimiento no conceden automáticamente la comunicación
   unicast posterior: esta sigue sujeta a la política de clientes.
-
-## Licencia
-
-No se ha definido todavía una licencia para este trabajo académico. Antes de
-publicarlo fuera del contexto de evaluación, añade una licencia explícita y
-revisa que no contiene información de terceros ni datos de una red real.

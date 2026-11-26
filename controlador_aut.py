@@ -1,6 +1,7 @@
 import json
 import argparse
 import os
+import subprocess
 import threading
 import tempfile
 import time
@@ -20,8 +21,30 @@ from policy_manager import (
     registrar_dispositivo,
 )
 
+def _entero_entorno(nombre, defecto, minimo):
+    """Lee un entero de configuración y usa el valor por defecto si no es válido."""
+    valor = os.environ.get(nombre)
+    if valor is None or valor.strip() == "":
+        return defecto
+    try:
+        numero = int(valor)
+    except ValueError:
+        print(f"AVISO: {nombre}={valor!r} no es un entero; se usa {defecto}.")
+        return defecto
+    if numero < minimo:
+        print(f"AVISO: {nombre}={numero} es menor que {minimo}; se usa {defecto}.")
+        return defecto
+    return numero
+
+
 INTERFACE = os.environ.get("TFG_INTERFACE", "phy0-ap0")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.json")
+
+# Concesión DHCP y retirada de los segmentos cuya concesión caduca sin renovarse.
+LEASE_TIME = _entero_entorno("TFG_LEASE_TIME", 3600, 60)
+LEASE_EXPIRY_ENABLED = os.environ.get("TFG_LEASE_EXPIRY", "1").strip() != "0"
+LEASE_GRACE = 60
+LEASE_CHECK_INTERVAL = 30
 
 # Sincronización del inventario y de las operaciones de red.
 db_lock = threading.RLock()
@@ -93,9 +116,17 @@ def reconciliar_estado_runtime():
 
     with db_lock:
         changed = False
+        now = time.time()
         for mac, exists in runtime_states.items():
             if bool(DISPOSITIVOS[mac].get("creada")) != exists:
                 DISPOSITIVOS[mac]["creada"] = exists
+                changed = True
+            # Un segmento activo sin fecha de concesión dispone de una concesión
+            # completa para renovarla antes de poder retirarse.
+            if exists and not isinstance(
+                DISPOSITIVOS[mac].get("ultima_concesion"), (int, float)
+            ):
+                DISPOSITIVOS[mac]["ultima_concesion"] = now
                 changed = True
         if changed:
             guardar_bbdd()
@@ -160,7 +191,7 @@ def craft_dhcp_response(pkt, msg_type_str, device_info):
         ("subnet_mask", "255.255.255.0"),
         ("router", device_info["ip_gateway"]),
         ("name_server", "8.8.8.8"),
-        ("lease_time", 3600),
+        ("lease_time", LEASE_TIME),
         "end"
     ])
     return ether / ip / udp / bootp / dhcp
@@ -194,6 +225,7 @@ def aprovisionar_dispositivo(mac, device):
         request_pkt = None
         with db_lock:
             DISPOSITIVOS[mac]["creada"] = True
+            DISPOSITIVOS[mac]["ultima_concesion"] = time.time()
             guardar_bbdd()
 
             req_data = pending_requests.pop(mac, None)
@@ -314,6 +346,8 @@ def dhcp(pkt):
                 sendp(ack_pkt, iface=INTERFACE, verbose=False)
                 with db_lock:
                     pending_requests.pop(mac_origen, None)
+                    DISPOSITIVOS[mac_origen]["ultima_concesion"] = time.time()
+                    guardar_bbdd()
             else:
                 print(f"DHCP Request de {mac_origen} pendiente hasta que termine la creación de la MACVLAN.")
                 iniciar_aprovisionamiento(mac_origen)
@@ -337,6 +371,98 @@ def vigilar_politicas(stop_event):
     while not stop_event.wait(POLICY_RELOAD_INTERVAL):
         with os_lock:
             recargar_politicas()
+
+
+STATION_RE = re.compile(r"^Station\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b")
+
+
+def estaciones_asociadas():
+    """Devuelve las MAC asociadas al AP, o None si no puede consultarse."""
+    try:
+        result = subprocess.run(
+            ["iw", "dev", INTERFACE, "station", "dump"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"No se pudieron consultar las estaciones asociadas: {error}")
+        return None
+    if result.returncode != 0:
+        print("No se pudieron consultar las estaciones asociadas.")
+        return None
+    stations = set()
+    for line in result.stdout.splitlines():
+        match = STATION_RE.match(line.strip())
+        if match:
+            stations.add(match.group(1).lower())
+    return stations
+
+
+def concesion_caducada(device, now):
+    """Indica si un segmento creado lleva más de una concesión sin renovarse."""
+    last = device.get("ultima_concesion")
+    if not device.get("creada") or not isinstance(last, (int, float)):
+        return False
+    return now - last > LEASE_TIME + LEASE_GRACE
+
+
+def revisar_concesiones():
+    """Retira los segmentos de clientes ausentes cuya concesión ha caducado.
+
+    Solo se retira un segmento si su concesión ha caducado y el equipo ya no
+    está asociado al AP. Si la asociación no puede comprobarse, no se retira
+    nada. La entrada del inventario se conserva para que el equipo recupere su
+    subred y su política si vuelve.
+    """
+    now = time.time()
+    with db_lock:
+        candidates = [
+            mac
+            for mac, device in DISPOSITIVOS.items()
+            if mac not in en_creacion and concesion_caducada(device, now)
+        ]
+    if not candidates:
+        return []
+
+    stations = estaciones_asociadas()
+    if stations is None:
+        return []
+
+    retired = []
+    for mac in candidates:
+        if mac in stations:
+            continue
+        # os_lock se adquiere antes de marcar el segmento para que un
+        # aprovisionamiento posterior espere a que termine la retirada.
+        with os_lock:
+            with db_lock:
+                device = DISPOSITIVOS.get(mac)
+                if (
+                    device is None
+                    or mac in en_creacion
+                    or not concesion_caducada(device, time.time())
+                ):
+                    continue
+                device["creada"] = False
+                pending_requests.pop(mac, None)
+                guardar_bbdd()
+                interface = device["nombre_vlan"]
+            print(f"Concesión caducada para {mac}; se retira su segmento.")
+            eliminar_dispositivo(mac)
+            eliminar_macvlan(interface)
+        retired.append(mac)
+    return retired
+
+
+def vigilar_concesiones(stop_event):
+    """Revisa periódicamente las concesiones sin interrumpir el servicio DHCP."""
+    while not stop_event.wait(LEASE_CHECK_INTERVAL):
+        try:
+            revisar_concesiones()
+        except Exception as error:  # El hilo no debe detenerse por un fallo puntual.
+            print(f"Error al revisar las concesiones: {error}")
 
 
 def setup_red():
@@ -366,6 +492,16 @@ def servir_dhcp():
         target=vigilar_politicas, args=(stop_event,), daemon=True
     ).start()
     print("Recarga automática de policies.json cada 2 segundos.")
+    if LEASE_EXPIRY_ENABLED:
+        threading.Thread(
+            target=vigilar_concesiones, args=(stop_event,), daemon=True
+        ).start()
+        print(
+            f"Concesiones de {LEASE_TIME} s; los segmentos sin renovar se "
+            "retiran si el cliente ya no está asociado."
+        )
+    else:
+        print(f"Concesiones de {LEASE_TIME} s; retirada automática desactivada.")
     print("Esperando peticiones DHCP...")
     try:
         sniff(iface=INTERFACE, filter="udp and (port 67 or 68)", prn=dhcp, store=0)

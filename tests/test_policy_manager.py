@@ -83,6 +83,84 @@ def test_manager_installs_base_rules_on_configured_ap_interface(tmp_path):
     assert any('device "phy4-ap0"' in ruleset for ruleset in rulesets)
 
 
+def test_base_reinstall_is_a_single_atomic_transaction(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._active = active_device(
+        dict(policy_manager.DEFAULT_POLICY, internet=False)
+    )
+    calls = []
+
+    def fake_run(command, input_text=None, allow_fail=False):
+        calls.append((command, input_text))
+        return completed(command)
+
+    with patch.object(manager, "_run_nft", side_effect=fake_run):
+        assert manager._install_base_locked() is True
+
+    # Solo la comprobación (-c) y una única transacción; ningún `nft delete` suelto.
+    assert [command for command, _ in calls] == [
+        ["nft", "-c", "-f", "-"],
+        ["nft", "-f", "-"],
+    ]
+    transaction = calls[1][1]
+    order = [
+        transaction.index("delete table netdev tfg_l2"),
+        transaction.index("delete table inet tfg_l3"),
+        transaction.index("table netdev tfg_l2 {"),
+        transaction.index("table inet tfg_l3 {"),
+        transaction.index("add element inet tfg_l3 internet_blocked_ips"),
+    ]
+    assert order == sorted(order)
+    assert transaction.index("add table netdev tfg_l2") < order[0]
+    assert "add element netdev tfg_l2 client_macs" in transaction
+
+
+def test_base_reinstall_falls_back_to_steps_if_transaction_fails(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._active = active_device()
+    calls = []
+
+    def fake_run(command, input_text=None, allow_fail=False):
+        calls.append((command, input_text))
+        if command == ["nft", "-f", "-"] and "delete table" in (input_text or ""):
+            return None
+        return completed(command)
+
+    with patch.object(manager, "_run_nft", side_effect=fake_run):
+        assert manager._install_base_locked() is True
+
+    commands = [command for command, _ in calls]
+    assert ["nft", "delete", "table", "netdev", "tfg_l2"] in commands
+    assert ["nft", "delete", "table", "inet", "tfg_l3"] in commands
+    assert "add element netdev tfg_l2 client_macs" in calls[-1][1]
+
+
+def test_initialize_keeps_existing_tables_until_reconcile(tmp_path):
+    manager = make_manager(tmp_path)
+    with patch.object(
+        policy_manager, "configurar_firewall_base", return_value=True
+    ), patch.object(
+        manager, "_tables_available_locked", return_value=True
+    ), patch.object(manager, "_install_base_locked") as install:
+        assert manager.initialize() is True
+
+    install.assert_not_called()
+
+
+def test_initialize_installs_tables_when_missing(tmp_path):
+    manager = make_manager(tmp_path)
+    with patch.object(
+        policy_manager, "configurar_firewall_base", return_value=True
+    ), patch.object(
+        manager, "_tables_available_locked", return_value=False
+    ), patch.object(
+        manager, "_install_base_locked", return_value=True
+    ) as install:
+        assert manager.initialize() is True
+
+    install.assert_called_once_with()
+
+
 def test_register_transaction_adds_only_dynamic_set_elements():
     transaction = policy_manager.render_set_update({}, active_device())
 

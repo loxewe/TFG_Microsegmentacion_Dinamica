@@ -260,10 +260,8 @@ manifiesto su identificador y SHA-256. Los trabajos permanecen en
 registro validado se conserva en el overlay persistente de OpenWrt. Al arrancar
 `tfg-web`, una instalación anterior se migra desde
 `/var/lib/tfg-ai/integrations` y `/var/lib/tfg-ai/approved` si todavía no existe
-el registro equivalente en `/etc/tfg-ai`. Si el registro temporal ya se perdió,
-las integraciones versionadas en `docs/experiments/generated_integrations` se
-restauran como segunda fuente. Ninguna de estas rutas sobrescribe un manifiesto
-persistente ya existente.
+el registro equivalente en `/etc/tfg-ai`. Ninguna de estas rutas sobrescribe un
+manifiesto persistente ya existente.
 
 Tras registrar el script, el mismo servicio usa el SSID y la clave Wi-Fi
 temporales para ejecutar automáticamente la secuencia normal: configurar el AP,

@@ -22,7 +22,7 @@ def do_login(password, router_ip="192.168.31.1"):
         r_html = session.get(f"{base_url}/cgi-bin/luci/web", timeout=5)
         import re
         mac_match = re.search(r"deviceId\s*=\s*['\"]([^'\"]+)['\"]", r_html.text)
-        mac = mac_match.group(1) if mac_match else "e0:d4:64:23:5f:0f"
+        mac = mac_match.group(1) if mac_match else "02:00:00:00:00:01"
     except requests.exceptions.RequestException:
         print("No se pudo contactar con el router Xiaomi.")
         return None, None

@@ -1,10 +1,10 @@
 # Análisis Comparativo: Dificultad de Automatización y Medidas de Seguridad en Routers ISP
 
-A continuación se presenta una evaluación comparativa de los tres routers analizados en este estudio, clasificados de menor a mayor dificultad técnica de cara a la ingeniería inversa y su posterior automatización mediante scripts nativos (Python).
+A continuación se presenta una evaluación comparativa de los routers analizados en este estudio, clasificados de menor a mayor dificultad técnica de cara a la ingeniería inversa y su posterior automatización mediante scripts nativos (Python).
 
 ---
 
-## Nivel 1: ZTE "Legacy" (Ej. Digi)
+## Nivel 1: ZTE ZXHN H298A V1.0
 **Nivel de Dificultad:** Medio-Bajo
 
 Este router representa un enfoque clásico de seguridad web embebida. Su barrera de entrada no es criptográfica, sino estructural (basada en Server-Side Rendering).
@@ -17,7 +17,7 @@ Este router representa un enfoque clásico de seguridad web embebida. Su barrera
 
 ---
 
-## Nivel 2: ZTE ZXHN H298A (Ej. MásMóvil / Pepephone)
+## Nivel 2: ZTE F6705
 **Nivel de Dificultad:** Alta
 
 Este modelo da un salto evolutivo importante, combinando seguridad asimétrica con un control de flujo de usuario muy restrictivo (Anti-Bot).

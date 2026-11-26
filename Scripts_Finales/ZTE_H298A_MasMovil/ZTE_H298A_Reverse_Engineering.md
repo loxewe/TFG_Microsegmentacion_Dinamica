@@ -1,6 +1,6 @@
-# Ingeniería Inversa del Router ZTE ZXHN H298A: Automatización de Red Wi-Fi
+# Ingeniería Inversa del Router ZTE F6705: Automatización de Red Wi-Fi
 
-Este documento detalla el proceso de análisis, depuración e ingeniería inversa realizado sobre la interfaz web del router de operadora ZTE ZXHN H298A, con el objetivo de automatizar el encendido y apagado de las redes Wi-Fi (2.4GHz y 5GHz). Esta documentación está pensada para ser anexada y explicada en el desarrollo del Trabajo de Fin de Grado (TFG).
+Este documento detalla el proceso de análisis, depuración e ingeniería inversa realizado sobre la interfaz web del router de operadora ZTE F6705 (software V11.2.10P2N8), con el objetivo de automatizar el encendido y apagado de las redes Wi-Fi (2.4GHz y 5GHz). Esta documentación está pensada para ser anexada y explicada en el desarrollo del Trabajo de Fin de Grado (TFG).
 
 ---
 
@@ -18,7 +18,7 @@ Por tanto, la solución requería de un script nativo y ultraligero que pudiera 
 Para poder emular la interfaz web, el primer paso consistió en interceptar el tráfico legítimo entre un navegador y el router mediante las DevTools (pestaña Network) y scripts de interceptación locales.
 
 ### Descubrimientos Criptográficos
-Contrario a los routers genéricos que envían peticiones `POST` en texto plano o con autenticación básica (`Basic Auth`), se descubrió que el ZTE ZXHN H298A utiliza un robusto sistema de cifrado asimétrico en la capa de aplicación (JavaScript) antes de que el tráfico siquiera toque la capa de transporte (HTTPS/TLS):
+Contrario a los routers genéricos que envían peticiones `POST` en texto plano o con autenticación básica (`Basic Auth`), se descubrió que el ZTE F6705 utiliza un robusto sistema de cifrado asimétrico en la capa de aplicación (JavaScript) antes de que el tráfico siquiera toque la capa de transporte (HTTPS/TLS):
 
 1. **Cifrado RSA del Payload:** Las variables de los formularios no se mandan en texto plano. En su lugar, se formatean como una cadena (ej. `IF_ACTION=Apply&RadioStatus_0=1...`), se les aplica una función hash (SHA-256) y finalmente se cifra dicho hash usando una clave pública **RSA de 2048 bits**.
 2. **Cabecera Check:** Este bloque cifrado se codifica en Base64 y se envía en una cabecera HTTP personalizada llamada `Check`.

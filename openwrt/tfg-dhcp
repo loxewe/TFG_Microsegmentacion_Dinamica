@@ -20,6 +20,8 @@ load_settings() {
     config_get PROJECT_DIR dhcp project_dir "$DEFAULT_PROJECT_DIR"
     config_get PYTHON dhcp python "$DEFAULT_PYTHON"
     config_get INTERFACE dhcp interface "auto"
+    config_get LEASE_TIME dhcp lease_time "3600"
+    config_get LEASE_EXPIRY dhcp lease_expiry "1"
     if [ "$INTERFACE" = "auto" ]; then
         attempt=0
         while ! INTERFACE="$("$INTERFACE_RESOLVER")"; do
@@ -53,7 +55,8 @@ start_service() {
     procd_open_instance
     procd_set_param command "$RUNNER" "$PID_FILE" "$LOG_FILE" \
         "$PYTHON" -u "$PROJECT_DIR/controlador_aut.py"
-    procd_set_param env TFG_INTERFACE="$INTERFACE"
+    procd_set_param env TFG_INTERFACE="$INTERFACE" \
+        TFG_LEASE_TIME="$LEASE_TIME" TFG_LEASE_EXPIRY="$LEASE_EXPIRY"
     procd_set_param respawn 3600 5 5
     procd_set_param stdout 1
     procd_set_param stderr 1

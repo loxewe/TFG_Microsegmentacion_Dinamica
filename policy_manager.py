@@ -436,6 +436,33 @@ class PolicyManager:
         )
         if self._run_nft(["nft", "-c", "-f", "-"], check_ruleset) is None:
             return False
+        ruleset = render_base_ruleset(
+            interface=self.interface,
+            management_ip=self._document["management_ip"],
+            management_router_ip=self._document["management_router_ip"],
+        )
+        initial_sets = render_set_update({}, self._active)
+        # Borrado, reglas y elementos en una sola transacción: nftables la aplica
+        # de forma atómica y nunca queda un instante sin tablas ni con los sets
+        # vacíos. `add table` antes de `delete` evita el error si no existían.
+        transaction = (
+            f"add table netdev {L2_TABLE_NAME}\n"
+            f"delete table netdev {L2_TABLE_NAME}\n"
+            f"add table inet {L3_TABLE_NAME}\n"
+            f"delete table inet {L3_TABLE_NAME}\n"
+            f"{ruleset.rstrip()}\n"
+            f"{initial_sets}"
+        )
+        if self._run_nft(["nft", "-f", "-"], transaction) is not None:
+            return True
+        print(
+            "La reinstalación atómica de tfg_l2/tfg_l3 falló; "
+            "se reinstalan por pasos."
+        )
+        return self._install_base_stepwise_locked(ruleset, initial_sets)
+
+    def _install_base_stepwise_locked(self, ruleset, initial_sets):
+        """Reinstalación por pasos: deja un hueco breve sin tablas."""
         self._run_nft(
             ["nft", "delete", "table", "netdev", L2_TABLE_NAME],
             allow_fail=True,
@@ -444,14 +471,8 @@ class PolicyManager:
             ["nft", "delete", "table", "inet", L3_TABLE_NAME],
             allow_fail=True,
         )
-        ruleset = render_base_ruleset(
-            interface=self.interface,
-            management_ip=self._document["management_ip"],
-            management_router_ip=self._document["management_router_ip"],
-        )
         if self._run_nft(["nft", "-f", "-"], ruleset) is None:
             return False
-        initial_sets = render_set_update({}, self._active)
         return not initial_sets or self._run_nft(
             ["nft", "-f", "-"], initial_sets
         ) is not None
@@ -472,7 +493,11 @@ class PolicyManager:
             self._active.clear()
             if not configurar_firewall_base():
                 return False
-            if not self._install_base_locked():
+            # Si las tablas ya existen (reinicio del servicio) se conservan con
+            # sus elementos: la reconciliación posterior las sustituye en una
+            # sola transacción. Reinstalarlas aquí vacías cortaría a todos los
+            # clientes hasta entonces.
+            if not self._tables_available_locked() and not self._install_base_locked():
                 return False
         print("Gestor de políticas L2/L3 iniciado.")
         if self._document["management_ip"]:

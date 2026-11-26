@@ -11,11 +11,11 @@ La mayor peculiaridad del ecosistema Xiaomi es su implementación del protocolo 
 ### Fase 1: Generación del Nonce (El Desafío del Cliente)
 El cliente extrae la dirección MAC del router mediante *scraping* o de una variable inyectada en el HTML (`deviceId`) y genera un código efímero llamado `nonce` concatenando 4 elementos:
 1. Un `0` (Tipo).
-2. La dirección **MAC** del router (ej. `e0:d4:64:23:5f:0f`).
+2. La dirección **MAC** del router (ej. `02:00:00:00:00:01`).
 3. El **Timestamp** UNIX de ese milisegundo (ej. `1786475892`).
 4. Un **número aleatorio** de 4 cifras.
 
-*Ejemplo de Nonce:* `0_e0:d4:64:23:5f:0f_1786475892_1491`
+*Ejemplo de Nonce:* `0_02:00:00:00:00:01_1786475892_1491`
 
 ### Fase 2: La Ecuación Criptográfica (Doble SHA-1)
 Dentro del código Javascript ofuscado (`login.html`), Xiaomi esconde una **Llave Maestra Secreta** (*Hardcoded*):

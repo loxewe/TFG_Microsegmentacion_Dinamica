@@ -1,7 +1,7 @@
 import importlib
 import sys
 import types
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -177,7 +177,8 @@ def test_dhcp_hostname_is_normalized_and_persisted_only_when_changed():
         controller.dhcp(packet)
 
     assert controller.DISPOSITIVOS[mac]["hostname"] == "living-room-tv"
-    save.assert_called_once_with()
+    # Cada ACK guarda la hora de concesión; el nombre solo se guarda la primera vez.
+    assert save.call_count == 3
 
 
 @pytest.mark.parametrize(
@@ -336,11 +337,30 @@ def test_main_stops_policy_watcher_when_capture_fails():
     ):
         controller.main()
 
+    assert thread.call_args_list == [
+        call(target=controller.vigilar_politicas, args=(stop_event,), daemon=True),
+        call(target=controller.vigilar_concesiones, args=(stop_event,), daemon=True),
+    ]
+    assert thread.return_value.start.call_count == 2
+    stop_event.set.assert_called_once()
+
+
+def test_lease_watcher_is_not_started_when_expiry_is_disabled():
+    controller = import_controller_without_scapy()
+    controller.LEASE_EXPIRY_ENABLED = False
+    stop_event = Mock()
+    with (
+        patch.object(controller.threading, "Event", return_value=stop_event),
+        patch.object(controller.threading, "Thread") as thread,
+        patch.object(controller, "reconciliar_estado_runtime", return_value=True),
+        patch.object(controller, "sniff", create=True, side_effect=RuntimeError("capture")),
+        pytest.raises(RuntimeError, match="capture"),
+    ):
+        controller.main()
+
     thread.assert_called_once_with(
         target=controller.vigilar_politicas, args=(stop_event,), daemon=True
     )
-    thread.return_value.start.assert_called_once()
-    stop_event.set.assert_called_once()
 
 
 def test_setup_red_does_not_start_service_when_base_policies_fail():
@@ -378,3 +398,179 @@ def test_main_starts_dhcp_without_reconfiguring_network():
         controller.main([])
     configure.assert_not_called()
     serve.assert_called_once_with()
+
+
+def _segmento(creada=True, ultima_concesion=None):
+    device = {
+        "nombre_vlan": "v_020000000001",
+        "ip_gateway": "192.168.10.1",
+        "ip_cliente": "192.168.10.100",
+        "creada": creada,
+    }
+    if ultima_concesion is not None:
+        device["ultima_concesion"] = ultima_concesion
+    return device
+
+
+def _revisar(controller, now, stations):
+    with (
+        patch.object(controller.time, "time", return_value=now),
+        patch.object(
+            controller, "estaciones_asociadas", return_value=stations
+        ) as associated,
+        patch.object(controller, "guardar_bbdd") as save,
+        patch.object(controller, "eliminar_dispositivo") as remove_policy,
+        patch.object(controller, "eliminar_macvlan") as remove_interface,
+    ):
+        retired = controller.revisar_concesiones()
+    return retired, associated, save, remove_policy, remove_interface
+
+
+def test_expired_lease_of_absent_client_retires_segment_and_keeps_inventory():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    expired = 1000.0 - controller.LEASE_TIME - controller.LEASE_GRACE - 1
+    controller.DISPOSITIVOS = {mac: _segmento(ultima_concesion=expired)}
+    controller.pending_requests[mac] = {"pkt": object(), "time": 0}
+
+    retired, _, save, remove_policy, remove_interface = _revisar(
+        controller, 1000.0, set()
+    )
+
+    assert retired == [mac]
+    remove_policy.assert_called_once_with(mac)
+    remove_interface.assert_called_once_with("v_020000000001")
+    save.assert_called_once_with()
+    assert controller.DISPOSITIVOS[mac]["creada"] is False
+    assert controller.DISPOSITIVOS[mac]["ip_cliente"] == "192.168.10.100"
+    assert mac not in controller.pending_requests
+
+
+def test_renewed_lease_keeps_segment_without_querying_stations():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: _segmento(ultima_concesion=900.0)}
+
+    retired, associated, _, remove_policy, remove_interface = _revisar(
+        controller, 1000.0, set()
+    )
+
+    assert retired == []
+    associated.assert_not_called()
+    remove_policy.assert_not_called()
+    remove_interface.assert_not_called()
+    assert controller.DISPOSITIVOS[mac]["creada"] is True
+
+
+def test_expired_lease_of_associated_client_keeps_segment():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: _segmento(ultima_concesion=0.0)}
+
+    retired, _, _, remove_policy, remove_interface = _revisar(
+        controller, 100000.0, {mac}
+    )
+
+    assert retired == []
+    remove_policy.assert_not_called()
+    remove_interface.assert_not_called()
+    assert controller.DISPOSITIVOS[mac]["creada"] is True
+
+
+def test_unknown_station_list_retires_nothing():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: _segmento(ultima_concesion=0.0)}
+
+    retired, _, _, remove_policy, remove_interface = _revisar(
+        controller, 100000.0, None
+    )
+
+    assert retired == []
+    remove_policy.assert_not_called()
+    remove_interface.assert_not_called()
+    assert controller.DISPOSITIVOS[mac]["creada"] is True
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        _segmento(creada=False, ultima_concesion=0.0),
+        _segmento(creada=True),
+    ],
+)
+def test_inactive_or_undated_segments_are_not_retired(device):
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: device}
+
+    retired, associated, *_ = _revisar(controller, 100000.0, set())
+
+    assert retired == []
+    associated.assert_not_called()
+
+
+def test_segment_being_provisioned_is_not_retired():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: _segmento(ultima_concesion=0.0)}
+    controller.en_creacion.add(mac)
+
+    retired, associated, *_ = _revisar(controller, 100000.0, set())
+
+    assert retired == []
+    associated.assert_not_called()
+
+
+def test_station_dump_is_parsed_and_failures_return_none():
+    controller = import_controller_without_scapy()
+    output = (
+        "Station 02:00:00:00:00:0A (on phy0-ap0)\n"
+        "\tinactive time:\t10 ms\n"
+        "Station 02:00:00:00:00:0b (on phy0-ap0)\n"
+    )
+    ok = Mock(returncode=0, stdout=output)
+    with patch.object(controller.subprocess, "run", return_value=ok) as run:
+        assert controller.estaciones_asociadas() == {
+            "02:00:00:00:00:0a",
+            "02:00:00:00:00:0b",
+        }
+    assert run.call_args.args[0] == [
+        "iw", "dev", controller.INTERFACE, "station", "dump"
+    ]
+
+    failed = Mock(returncode=1, stdout="")
+    with patch.object(controller.subprocess, "run", return_value=failed):
+        assert controller.estaciones_asociadas() is None
+    with patch.object(controller.subprocess, "run", side_effect=OSError("iw")):
+        assert controller.estaciones_asociadas() is None
+
+
+def test_lease_time_comes_from_environment_with_safe_fallback():
+    for value, expected in [("300", 300), ("abc", 3600), ("10", 3600), ("", 3600)]:
+        with patch.dict("os.environ", {"TFG_LEASE_TIME": value}):
+            controller = import_controller_without_scapy()
+        assert controller.LEASE_TIME == expected
+    with patch.dict("os.environ", {"TFG_LEASE_EXPIRY": "0"}):
+        controller = import_controller_without_scapy()
+    assert controller.LEASE_EXPIRY_ENABLED is False
+
+
+def test_reconciliation_dates_active_segments_without_lease():
+    controller = import_controller_without_scapy()
+    mac = "02:00:00:00:00:01"
+    controller.DISPOSITIVOS = {mac: _segmento(creada=True)}
+
+    with (
+        patch.object(controller.os.path, "exists", return_value=True),
+        patch.object(controller, "interfaz_en_padre_actual", return_value=True),
+        patch.object(controller, "obtener_clientes_runtime", return_value={mac}),
+        patch.object(controller.time, "time", return_value=5000.0),
+        patch.object(controller, "guardar_bbdd") as save,
+        patch.object(controller, "reconciliar_interfaces_firewall", return_value=True),
+        patch.object(controller, "reconciliar_dispositivos", return_value=True),
+    ):
+        assert controller.reconciliar_estado_runtime() is True
+
+    assert controller.DISPOSITIVOS[mac]["ultima_concesion"] == 5000.0
+    save.assert_called_once_with()
